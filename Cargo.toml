@@ -1,0 +1,10 @@
+[package]
+name = "txs"
+description = "a blockchain"
+version = "0.1.0"
+authors = ["Aaron Lebo <aaron.matthew.lebo@gmail.com>"]
+license = "ISC"
+repository = "https://github.com/aaron-lebo/txs"
+
+[dependencies]
+sha2 = "0.7.0"
