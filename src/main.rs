@@ -15,19 +15,16 @@ impl Block {
     fn new(data: &[u8], prev_hash: &[u8]) -> Self {
         let ts = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap();
         let ts = ts.as_secs() * 1000 + ts.subsec_nanos() as u64 / 1_000_000;
-        let hash = {
-            let mut hasher = Sha256::default();
-            let ts_bytes: [u8; 8] = unsafe { mem::transmute(ts.to_be()) };
-            hasher.input(&ts_bytes);
-            hasher.input(data);
-            hasher.input(prev_hash);
-            hasher.result()[..].to_owned()
-        };
+        let ts_bytes: [u8; 8] = unsafe { mem::transmute(ts.to_be()) };
+        let mut hash = Sha256::default();
+        hash.input(&ts_bytes);
+        hash.input(data);
+        hash.input(prev_hash);
         Block {
             timestamp: ts,
             data: data.to_owned(),
             prev_hash: prev_hash.to_owned(),
-            hash: hash,
+            hash: hash.result()[..].to_owned(),
         }
     }
 }
