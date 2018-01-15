@@ -1,9 +1,14 @@
+#[macro_use]
+extern crate serde_derive;
+extern crate bincode;
+extern crate rocksdb;
 extern crate sha2;
 
+use rocksdb::DB;
 use sha2::{Digest, Sha256};
 use std::{mem, time};
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 struct Block {
     timestamp: u64,
     data: Vec<u8>,
@@ -27,29 +32,58 @@ impl Block {
             hash: hash.result()[..].to_owned(),
         }
     }
+
+    fn save(&self, db: &DB) {
+        let hash = &self.hash;
+        let encoded: Vec<u8> = bincode::serialize(&self, bincode::Infinite).unwrap();
+        db.put(hash, &encoded).unwrap();
+        db.put(b"tip", hash).unwrap();
+    }
 }
 
 struct Blockchain {
-    blocks: Vec<Block>,
+    db: DB,
+    tip: Vec<u8>,
 }
 
 impl Blockchain {
     fn new() -> Self {
-        Blockchain {
-            blocks: vec![Block::new(b"genesis", b"")],
-        }
+        let db = DB::open_default("./data").unwrap();
+        let tip = match db.get(b"tip") {
+            Ok(Some(val)) => val.to_vec(),
+            Ok(None) => {
+                let block = Block::new(b"genesis", b"");
+                block.save(&db);
+                block.hash
+            },
+            Err(err) => panic!(err),
+        };
+        Blockchain { db, tip }
     }
 
     fn add(&mut self, data: &[u8]) {
-        let prev_hash = self.blocks.last().unwrap().hash.clone();
-        self.blocks.push(Block::new(data, &prev_hash));
+        let block = Block::new(data, &self.tip);
+        block.save(&self.db);
+        self.tip = block.hash;
+    }
+
+    fn items(&self) -> Vec<Block> {
+        let mut tip = self.tip.clone();
+        let mut blocks = Vec::new();
+        while tip != b"" {
+            let encoded = self.db.get(&tip).unwrap().unwrap();
+            let block: Block = bincode::deserialize(&encoded[..]).unwrap();
+            tip = block.prev_hash.clone();
+            blocks.push(block);
+        }
+        blocks
     }
 }
 
 fn main() {
     let mut chain = Blockchain::new();
     chain.add(b"hello world");
-    for block in chain.blocks {
+    for block in chain.items() {
         println!("{:?}", block);
     }
 }
