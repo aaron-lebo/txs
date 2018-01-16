@@ -6,7 +6,7 @@ extern crate sha2;
 
 use rocksdb::DB;
 use sha2::{Digest, Sha256};
-use std::{mem, time};
+use std::{env, mem, time};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Block {
@@ -61,10 +61,11 @@ impl Blockchain {
         Blockchain { db, tip }
     }
 
-    fn add(&mut self, data: &str) {
+    fn add(&mut self, data: &str) -> Block {
         let block = Block::new(data, &self.tip);
         block.save(&self.db);
-        self.tip = block.hash;
+        self.tip = block.hash.clone();
+        block
     }
 
     fn items(&self) -> Vec<Block> {
@@ -81,9 +82,20 @@ impl Blockchain {
 }
 
 fn main() {
+    let args: Vec<String> = env::args().collect();
+    let args: (&str, &str, &str) = match args.len() {
+        4 => (&args[1], &args[2], &args[3]),
+        3 => (&args[1], &args[2], ""),
+        _ => ("", "", ""),
+    };
     let mut chain = Blockchain::new();
-    chain.add("hello world");
-    for block in chain.items() {
-        println!("{:?}", block);
+    match args {
+        ("blocks", "list", "") => {
+            for block in chain.items() {
+                println!("{:?}", block);
+            }
+        },
+        ("blocks", "create", data) => println!("{:?}", chain.add(data)),
+        _ => println!("bad args"),
     }
 }
