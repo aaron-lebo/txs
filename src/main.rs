@@ -22,6 +22,12 @@ struct Output {
     pubkey: String,
 }
 
+impl Output {
+    fn unlocked_by(&self, addr: &str) -> bool{
+        self.pubkey == addr
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Transaction {
     id: String,
@@ -30,22 +36,24 @@ struct Transaction {
 }
 
 impl Transaction {
-    fn coinbase() -> Self {
-        let mut tx = Transaction {
-            id: "".to_owned(),
-            inputs: vec!(Input { txid: "".to_owned(), index: -1, sig: "".to_owned() }),
-            outputs: vec!(Output { amount: 100, pubkey: "dog".to_owned() })
-        };
+    fn new(inputs: Vec<Input>, outputs: Vec<Output>) -> Self {
+        let mut tx = Transaction { id: "".to_owned(), inputs, outputs };
         tx.id = tx.hash();
         tx
     }
 
+    fn coinbase() -> Self {
+        Transaction::new(
+            vec!(Input { txid: "".to_owned(), index: -1, sig: "".to_owned() }),
+            vec!(Output { amount: 100, pubkey: "dog".to_owned() }),
+        )
+    }
+
     fn is_coinbase(&self) -> bool {
-        if self.inputs.len() != 1 {
-            return false;
+        self.inputs.len() == 1 && {
+            let input = &self.inputs[0];
+            input.txid == "" && input.index == -1
         }
-        let input = &self.inputs[0];
-        input.txid == "" && input.index == -1
     }
 
 
@@ -97,6 +105,8 @@ impl Block {
     }
 }
 
+type IndexMap = HashMap<String, Vec<i8>>;
+
 struct Blockchain {
     db: DB,
     tip: String,
@@ -117,63 +127,6 @@ impl Blockchain {
         Blockchain { db, tip }
     }
 
-    fn add(&mut self, txs: Txs) -> Block {
-        let block = Block::new(txs, &self.tip);
-        block.save(&self.db);
-        self.tip = block.hash.clone();
-        block
-    }
-
-    fn unspent_txs(&self, addr: &str) -> Txs {
-        let mut spent: HashMap<String, Vec<i8>> = HashMap::new();
-        let mut unspent = vec!();
-        for block in self.blocks() {
-            for tx in block.transactions {
-                'outputs: for (i, out) in tx.outputs.iter().enumerate() {
-                    if let Some(idxs) = spent.get(&tx.id) {
-                        for idx in idxs {
-                            if *idx == i as i8 {
-                                continue 'outputs;
-                            }
-                        }
-                    }
-                    if out.pubkey == addr {
-                        unspent.push(tx.clone());
-                    }
-                }
-                if !tx.is_coinbase() {
-                    for input in tx.inputs {
-                        spent.entry(tx.id.to_owned()).or_insert(vec!()).push(input.index);
-                    }
-                }
-            }
-            if block.prev_hash == "" {
-                break;
-            }
-        }
-        unspent
-    }
-
-    fn utxos(&self, addr: &str) -> Vec<Output> {
-        let mut utxos = vec!();
-        for tx in self.unspent_txs(addr) {
-            for out in tx.outputs {
-                if out.pubkey == addr {
-                    utxos.push(out);
-                }
-            }
-        }
-        utxos
-    }
-
-    fn balance(&self, addr: &str) -> u64 {
-        let mut balance = 0;
-        for out in self.utxos(addr) {
-            balance += out.amount;
-        }
-        balance
-    }
-
     fn blocks(&self) -> Vec<Block> {
         let mut tip = self.tip.clone();
         let mut blocks = vec!();
@@ -185,23 +138,114 @@ impl Blockchain {
         }
         blocks
     }
+
+    fn add(&mut self, txs: Txs) -> Block {
+        let block = Block::new(txs, &self.tip);
+        block.save(&self.db);
+        self.tip = block.hash.clone();
+        block
+    }
+
+    fn unspent_txs(&self, addr: &str) -> Txs {
+        let (mut spent, mut unspent): (IndexMap, _) = (HashMap::new(), vec!());
+        for block in self.blocks() {
+            for tx in block.transactions {
+                'i: for (i, out) in tx.outputs.iter().enumerate() {
+                    if let Some(idxs) = spent.get(&tx.id) {
+                        for idx in idxs {
+                            if *idx == i as i8 {
+                                continue 'i;
+                            }
+                        }
+                    }
+                    if out.unlocked_by(addr) {
+                        unspent.push(tx.clone());
+                    }
+                }
+                if !tx.is_coinbase() {
+                    for input in tx.inputs {
+                        if input.sig == addr {
+                            spent.entry(input.txid).or_insert(vec!()).push(input.index);
+                        }
+                    }
+                }
+            }
+        }
+        unspent
+    }
+
+    fn utxos(&self, addr: &str) -> Vec<Output> {
+        let mut utxos = vec!();
+        for tx in self.unspent_txs(addr) {
+            for out in tx.outputs {
+                if out.unlocked_by(addr) {
+                    utxos.push(out);
+                }
+            }
+        }
+        utxos
+    }
+
+    fn balance(&self, addr: &str) -> u64 {
+        self.utxos(addr).iter().fold(0, |a, b| a + b.amount)
+    }
+
+    fn unspent_outputs(&self, addr: &str, amount: u64) -> (u64, IndexMap) {
+        let mut sum = 0;
+        let mut unspent_outs: IndexMap = HashMap::new();
+        'tx: for tx in self.unspent_txs(addr) {
+            for (i, out) in tx.outputs.iter().enumerate() {
+                if out.unlocked_by(addr) && sum < amount {
+                    sum += out.amount;
+                    unspent_outs.entry(tx.id.to_owned()).or_insert(vec!()).push(i as i8);
+                    if sum >= amount {
+                        break 'tx;
+                    }
+                }
+            }
+        }
+        (sum, unspent_outs)
+    }
+
+    fn send(&self, from: &str, to: &str, amount: u64) -> Transaction {
+        let (sum, unspent_outs) = self.unspent_outputs(from, amount);
+        if sum < amount {
+            panic!("insufficient funds");
+        }
+        let (mut inputs, mut outputs) = (vec!(), vec!());
+        for (txid, outs) in unspent_outs {
+            for index in outs {
+                inputs.push(Input { txid: txid.clone(), index, sig: from.to_owned() });
+            }
+        }
+        outputs.push(Output{ amount, pubkey: to.to_owned() });
+        if sum > amount {
+            outputs.push(Output{ amount: sum - amount, pubkey: from.to_owned() });
+        }
+        Transaction::new(inputs, outputs)
+    }
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
     let args: (&str, &str, &str) = match args.len() {
-        4 => (&args[1], &args[2], &args[3]),
+        2 => (&args[1], "", ""),
         3 => (&args[1], &args[2], ""),
+        4 => (&args[1], &args[2], &args[3]),
         _ => ("", "", ""),
     };
     let mut chain = Blockchain::new();
     match args {
-        ("blocks", "list", "") => {
+        ("blocks", "", "") => {
             for block in chain.blocks() {
                 println!("{:?}", block);
             }
         },
         ("balance", addr, "") => println!("{} has a balance of {}", addr, chain.balance(addr)),
+        ("send", from, to) => {
+            let tx = chain.send(from, to, 10);
+            println!("{:?}", chain.add(vec!(tx)));
+        },
         _ => println!("bad args"),
     }
 }
